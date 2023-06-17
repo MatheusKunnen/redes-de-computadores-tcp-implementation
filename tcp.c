@@ -36,11 +36,129 @@ typedef struct pkt
   char payload[20];
 } pkt_t;
 
+void tolayer3(int AorB, pkt_t packet);
+void tolayer5(int AorB, char *data);
+
 /********* STUDENTS WRITE THE NEXT SEVEN ROUTINES *********/
+
+#define S_WAITING_DATA_0 0
+#define S_WAITING_ACK_0 1
+#define S_WAITING_DATA_1 2
+#define S_WAITING_ACK_1 3
+
+pkt_t *pkt_in_transit_a = NULL;
+int state_a = S_WAITING_DATA_0;
+int last_acked_a = 0;
+
+void get_buffer_from_packet(pkt_t *packet, char *buffer)
+{
+  // Loads seqnum to buffer
+  char *tmp_buffer = buffer;
+  *(tmp_buffer + 0) = (packet->seqnum >> 0);
+  *(tmp_buffer + 1) = (packet->seqnum >> 8);
+  *(tmp_buffer + 2) = (packet->seqnum >> 16);
+  *(tmp_buffer + 3) = (packet->seqnum >> 24);
+
+  // Loads acknum to buffer
+  tmp_buffer = buffer + 4;
+  *(tmp_buffer + 0) = (packet->acknum >> 0);
+  *(tmp_buffer + 1) = (packet->acknum >> 8);
+  *(tmp_buffer + 2) = (packet->acknum >> 16);
+  *(tmp_buffer + 3) = (packet->acknum >> 24);
+
+  // Loads payload to buffer
+  tmp_buffer = buffer + 8;
+  for (int i = 0; i < 20; i++)
+  {
+    tmp_buffer[i] = packet->payload[i];
+  }
+}
+
+int get_checksum_from_buffer(char *buffer, size_t size)
+{
+  unsigned int cksum = 0;
+  while (size > 1)
+  {
+    cksum += *((unsigned short *)(buffer + 1));
+    size -= 2;
+    buffer += 2;
+  }
+  if (size)
+    cksum += (unsigned short)(0x00FF & *buffer);
+
+  cksum = (~cksum & 0xffff);
+  return cksum;
+}
+
+int get_checksum(pkt_t *packet)
+{
+  int checksum = 0;
+  char buffer[sizeof(pkt_t)] = {0x0};
+
+  get_buffer_from_packet(packet, buffer);
+
+  return checksum;
+}
+
+int is_corrupted(pkt_t *packet)
+{
+  int checksum = get_checksum(packet);
+  return checksum != packet->checksum;
+}
+
+pkt_t *get_pkt_from_msg(msg_t *msg, int sequence, int acknum)
+{
+  pkt_t *packet = (pkt_t *)malloc(sizeof(pkt_t));
+
+  packet->seqnum = sequence;
+  packet->acknum = acknum;
+
+  for (int i = 0; i < 20; i++)
+  {
+    packet->payload[i] = msg->data[i];
+  }
+
+  return packet;
+}
+
+pkt_t *get_ack_pkt(pkt_t *packet, pkt_t *received_pkt, int seqnum)
+{
+  // pkt_t *packet = (pkt_t *)malloc(sizeof(pkt_t));
+
+  packet->seqnum = seqnum;
+  packet->acknum = received_pkt->acknum;
+  packet->payload;
+
+  for (int i = 0; i < 20; i++)
+  {
+    packet->payload[i] = 0;
+  }
+
+  packet->checksum = get_checksum(packet);
+
+  return packet;
+}
 
 /* called from layer 5, passed the data to be sent to other side */
 void A_output(msg_t message)
 {
+  switch (state_a)
+  {
+  case S_WAITING_DATA_0:
+    pkt_in_transit_a = get_pkt_from_msg(&message, 0, last_acked_a);
+    // printf("%d\n", pkt_in_transit_a->seqnum);
+    state_a = S_WAITING_ACK_0;
+    tolayer3(1, *pkt_in_transit_a);
+    break;
+  case S_WAITING_DATA_1:
+    pkt_in_transit_a = get_pkt_from_msg(&message, 1, last_acked_a);
+    state_a = S_WAITING_ACK_1;
+    tolayer3(1, *pkt_in_transit_a);
+  default:
+    printf("Invalid output state\n");
+    // exit(1);
+    break;
+  }
   return;
 }
 
@@ -52,12 +170,38 @@ void B_output(msg_t message) /* need be completed only for extra credit */
 /* called from layer 3, when a packet arrives for layer 4 */
 void A_input(pkt_t packet)
 {
+  switch (state_a)
+  {
+  case S_WAITING_ACK_0:
+    if (!is_corrupted(&packet) && packet.acknum == 0)
+    {
+      free(pkt_in_transit_a);
+      pkt_in_transit_a = NULL;
+      state_a = S_WAITING_DATA_1;
+    }
+    break;
+  case S_WAITING_ACK_1:
+    if (!is_corrupted(&packet) && packet.acknum == 1)
+    {
+      free(pkt_in_transit_a);
+      pkt_in_transit_a = NULL;
+      state_a = S_WAITING_DATA_0;
+    }
+  default:
+    printf("Invalid input state\n");
+    exit(1);
+    break;
+  }
   return;
 }
 
 /* called when A's timer goes off */
 void A_timerinterrupt()
 {
+  if (pkt_in_transit_a != NULL)
+  {
+    tolayer3(1, *pkt_in_transit_a);
+  }
   return;
 }
 
@@ -73,6 +217,13 @@ void A_init()
 /* called from layer 3, when a packet arrives for layer 4 at B*/
 void B_input(pkt_t packet)
 {
+  printf("B_input\n");
+  pkt_t ack_packet;
+  if (!is_corrupted(&packet))
+  {
+    get_ack_pkt(&ack_packet, &packet, 0);
+    tolayer5(2, packet.payload);
+  }
   return;
 }
 
@@ -352,7 +503,7 @@ void insertevent(event_t *p)
   }
 }
 
-printevlist()
+void printevlist()
 {
   event_t *q;
   int i;
@@ -498,7 +649,7 @@ struct pkt packet;
   insertevent(evptr);
 }
 
-tolayer5(AorB, datasent) int AorB;
+void tolayer5(AorB, datasent) int AorB;
 char datasent[20];
 {
   int i;
