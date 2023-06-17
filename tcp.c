@@ -14,8 +14,11 @@
      (although some can be lost).
 **********************************************************************/
 
-#define BIDIRECTIONAL 0 /* change to 1 if you're doing extra credit */
+#define BIDIRECTIONAL 1 /* change to 1 if you're doing extra credit */
                         /* and write a routine called B_output */
+
+#define A 0
+#define B 1
 
 /* a "msg" is the data unit passed from layer 5 (teachers code) to layer  */
 /* 4 (students' code).  It contains the data (characters) to be delivered */
@@ -38,7 +41,8 @@ typedef struct pkt
 
 void tolayer3(int AorB, pkt_t packet);
 void tolayer5(int AorB, char *data);
-
+void stoptimer(int);
+void starttimer(int, float);
 /********* STUDENTS WRITE THE NEXT SEVEN ROUTINES *********/
 
 #define S_WAITING_DATA_0 0
@@ -46,9 +50,17 @@ void tolayer5(int AorB, char *data);
 #define S_WAITING_DATA_1 2
 #define S_WAITING_ACK_1 3
 
-pkt_t *pkt_in_transit_a = NULL;
-int state_a = S_WAITING_DATA_0;
-int last_acked_a = 0;
+typedef struct caller_state_s
+{
+  pkt_t *pkt_in_transit;
+  int state;
+  int last_acked;
+  int timeout;
+  int id;
+} caller_state_t;
+
+caller_state_t a;
+caller_state_t b;
 
 void get_buffer_from_packet(pkt_t *packet, char *buffer)
 {
@@ -92,10 +104,11 @@ int get_checksum_from_buffer(char *buffer, size_t size)
 
 int get_checksum(pkt_t *packet)
 {
-  int checksum = 0;
   char buffer[sizeof(pkt_t)] = {0x0};
 
   get_buffer_from_packet(packet, buffer);
+
+  int checksum = get_checksum_from_buffer(buffer, 20);
 
   return checksum;
 }
@@ -118,18 +131,23 @@ pkt_t *get_pkt_from_msg(msg_t *msg, int sequence, int acknum)
     packet->payload[i] = msg->data[i];
   }
 
+  packet->checksum = get_checksum(packet);
+
   return packet;
 }
 
 pkt_t *get_ack_pkt(pkt_t *packet, pkt_t *received_pkt, int seqnum)
 {
-  // pkt_t *packet = (pkt_t *)malloc(sizeof(pkt_t));
-
   packet->seqnum = seqnum;
-  packet->acknum = received_pkt->acknum;
+  packet->acknum = received_pkt->seqnum;
   packet->payload;
 
-  for (int i = 0; i < 20; i++)
+  packet->payload[0] = 'A';
+  packet->payload[1] = 'C';
+  packet->payload[2] = 'K';
+  packet->payload[3] = '\0';
+
+  for (int i = 4; i < 20; i++)
   {
     packet->payload[i] = 0;
   }
@@ -139,69 +157,116 @@ pkt_t *get_ack_pkt(pkt_t *packet, pkt_t *received_pkt, int seqnum)
   return packet;
 }
 
+int is_ack_packet(pkt_t *packet)
+{
+  return packet->payload[0] == 'A' &&
+         packet->payload[1] == 'C' &&
+         packet->payload[2] == 'K';
+}
+
+void handle_output(caller_state_t *caller, msg_t *message)
+{
+  switch (caller->state)
+  {
+  case S_WAITING_DATA_0:
+    caller->pkt_in_transit = get_pkt_from_msg(message, 0, caller->last_acked);
+    caller->state = S_WAITING_ACK_0;
+    tolayer3(caller->id, *(caller->pkt_in_transit));
+    starttimer(caller->id, caller->timeout);
+    break;
+  case S_WAITING_DATA_1:
+    caller->pkt_in_transit = get_pkt_from_msg(message, 1, caller->last_acked);
+    caller->state = S_WAITING_ACK_1;
+    tolayer3(caller->id, *(caller->pkt_in_transit));
+    starttimer(caller->id, caller->timeout);
+    break;
+  default:
+    break;
+  }
+}
+
+void handle_input(caller_state_t *caller, pkt_t *packet)
+{
+  if (!is_corrupted(packet))
+  {
+    if (!is_ack_packet(packet))
+    {
+      if (packet->seqnum != caller->last_acked)
+      {
+        tolayer5(caller->id, packet->payload);
+      }
+
+      pkt_t ack_packet;
+      get_ack_pkt(&ack_packet, packet, 0);
+      tolayer3(caller->id, ack_packet);
+      caller->last_acked = packet->seqnum;
+    }
+    else
+    {
+      switch (caller->state)
+      {
+      case S_WAITING_ACK_0:
+        if (packet->acknum == 0)
+        {
+          free(caller->pkt_in_transit);
+          caller->pkt_in_transit = NULL;
+          caller->state = S_WAITING_DATA_1;
+          stoptimer(caller->id);
+        }
+        break;
+      case S_WAITING_ACK_1:
+        if (packet->acknum == 1)
+        {
+          free(caller->pkt_in_transit);
+          caller->pkt_in_transit = NULL;
+          caller->state = S_WAITING_DATA_0;
+          stoptimer(caller->id);
+        }
+        break;
+      default:
+        break;
+      }
+    }
+  }
+  else
+  {
+    printf("Corrupted packet arrive %d\n", caller->id);
+  }
+}
+
+void handle_timerinterrupt(caller_state_t *caller)
+{
+  if (caller->pkt_in_transit != NULL)
+  {
+    tolayer3(caller->id, *caller->pkt_in_transit);
+    starttimer(caller->id, caller->timeout);
+  }
+}
+
 /* called from layer 5, passed the data to be sent to other side */
 void A_output(msg_t message)
 {
-  switch (state_a)
-  {
-  case S_WAITING_DATA_0:
-    pkt_in_transit_a = get_pkt_from_msg(&message, 0, last_acked_a);
-    // printf("%d\n", pkt_in_transit_a->seqnum);
-    state_a = S_WAITING_ACK_0;
-    tolayer3(1, *pkt_in_transit_a);
-    break;
-  case S_WAITING_DATA_1:
-    pkt_in_transit_a = get_pkt_from_msg(&message, 1, last_acked_a);
-    state_a = S_WAITING_ACK_1;
-    tolayer3(1, *pkt_in_transit_a);
-  default:
-    printf("Invalid output state\n");
-    // exit(1);
-    break;
-  }
+  handle_output(&a, &message);
   return;
 }
 
 void B_output(msg_t message) /* need be completed only for extra credit */
 {
+  handle_output(&b, &message);
   return;
 }
 
 /* called from layer 3, when a packet arrives for layer 4 */
 void A_input(pkt_t packet)
 {
-  switch (state_a)
-  {
-  case S_WAITING_ACK_0:
-    if (!is_corrupted(&packet) && packet.acknum == 0)
-    {
-      free(pkt_in_transit_a);
-      pkt_in_transit_a = NULL;
-      state_a = S_WAITING_DATA_1;
-    }
-    break;
-  case S_WAITING_ACK_1:
-    if (!is_corrupted(&packet) && packet.acknum == 1)
-    {
-      free(pkt_in_transit_a);
-      pkt_in_transit_a = NULL;
-      state_a = S_WAITING_DATA_0;
-    }
-  default:
-    printf("Invalid input state\n");
-    exit(1);
-    break;
-  }
+  handle_input(&a, &packet);
   return;
 }
 
 /* called when A's timer goes off */
 void A_timerinterrupt()
 {
-  if (pkt_in_transit_a != NULL)
-  {
-    tolayer3(1, *pkt_in_transit_a);
-  }
+  handle_timerinterrupt(&a);
   return;
 }
 
@@ -209,6 +274,11 @@ void A_timerinterrupt()
 /* entity A routines are called. You can use it to do any initialization */
 void A_init()
 {
+  a.id = A;
+  a.pkt_in_transit = NULL;
+  a.state = S_WAITING_DATA_0;
+  a.last_acked = -1;
+  a.timeout = 200;
   return;
 }
 
@@ -217,19 +287,14 @@ void A_init()
 /* called from layer 3, when a packet arrives for layer 4 at B*/
 void B_input(pkt_t packet)
 {
-  printf("B_input\n");
-  pkt_t ack_packet;
-  if (!is_corrupted(&packet))
-  {
-    get_ack_pkt(&ack_packet, &packet, 0);
-    tolayer5(2, packet.payload);
-  }
+  handle_input(&b, &packet);
   return;
 }
 
 /* called when B's timer goes off */
 void B_timerinterrupt()
 {
+  handle_timerinterrupt(&b);
   return;
 }
 
@@ -237,6 +302,11 @@ void B_timerinterrupt()
 /* entity B routines are called. You can use it to do any initialization */
 void B_init()
 {
+  b.id = B;
+  b.pkt_in_transit = NULL;
+  b.state = S_WAITING_DATA_0;
+  b.last_acked = -1;
+  b.timeout = 200;
   return;
 }
 
@@ -280,8 +350,6 @@ void init();
 
 #define OFF 0
 #define ON 1
-#define A 0
-#define B 1
 
 int TRACE = 1;   /* for my debugging */
 int nsim = 0;    /* number of messages from 5 to 4 so far */
@@ -325,11 +393,13 @@ void main()
         printf(", fromlayer5 ");
       else
         printf(", fromlayer3 ");
-      printf(" entity: %d\n", eventptr->eventity);
+      printf(" entity: %c\n", eventptr->eventity == A ? 'A' : 'B');
     }
     time = eventptr->evtime; /* update time to next event time */
     if (nsim == nsimmax)
+    {
       break; /* all done with simulation */
+    }
     if (eventptr->evtype == FROM_LAYER5)
     {
       generate_next_arrival(); /* set up future arrival */
@@ -356,11 +426,17 @@ void main()
       pkt2give.acknum = eventptr->pktptr->acknum;
       pkt2give.checksum = eventptr->pktptr->checksum;
       for (i = 0; i < 20; i++)
+      {
         pkt2give.payload[i] = eventptr->pktptr->payload[i];
-      if (eventptr->eventity == A) /* deliver packet by calling */
-        A_input(pkt2give);         /* appropriate entity */
+      }
+      if (eventptr->eventity == A)
+      {                    /* deliver packet by calling */
+        A_input(pkt2give); /* appropriate entity */
+      }
       else
+      {
         B_input(pkt2give);
+      }
       free(eventptr->pktptr); /* free the memory for packet */
     }
     else if (eventptr->evtype == TIMER_INTERRUPT)
@@ -389,15 +465,20 @@ void init() /* initialize the simulator */
 
   printf("-----  Stop and Wait Network Simulator Version 1.1 -------- \n\n");
   printf("Enter the number of messages to simulate: ");
-  scanf("%d", &nsimmax);
+  // scanf("%d", &nsimmax);
+  nsimmax = 10;
   printf("Enter  packet loss probability [enter 0.0 for no loss]:");
-  scanf("%f", &lossprob);
+  // scanf("%f", &lossprob);
+  lossprob = 0.1;
   printf("Enter packet corruption probability [0.0 for no corruption]:");
-  scanf("%f", &corruptprob);
+  // scanf("%f", &corruptprob);
+  corruptprob = 0.1;
   printf("Enter average time between messages from sender's layer5 [ > 0.0]:");
-  scanf("%f", &lambda);
+  // scanf("%f", &lambda);
+  lambda = 150;
   printf("Enter TRACE:");
-  scanf("%d", &TRACE);
+  TRACE = 3;
+  // scanf("%d", &TRACE);
 
   srand(9999); /* init random number generator */
   sum = 0.0;   /* test random number generator for students */
@@ -436,6 +517,18 @@ float jimsrand()
 /********************* EVENT HANDLINE ROUTINES *******/
 /*  The next set of routines handle the event list   */
 /*****************************************************/
+
+void printevlist()
+{
+  event_t *q;
+  int i;
+  printf("--------------\nEvent List Follows:\n");
+  for (q = evlist; q != NULL; q = q->next)
+  {
+    printf("Event time: %f, type: %d entity: %d\n", q->evtime, q->evtype, q->eventity);
+  }
+  printf("--------------\n");
+}
 
 void generate_next_arrival()
 {
@@ -501,18 +594,7 @@ void insertevent(event_t *p)
       q->prev = p;
     }
   }
-}
-
-void printevlist()
-{
-  event_t *q;
-  int i;
-  printf("--------------\nEvent List Follows:\n");
-  for (q = evlist; q != NULL; q = q->next)
-  {
-    printf("Event time: %f, type: %d entity: %d\n", q->evtime, q->evtype, q->eventity);
-  }
-  printf("--------------\n");
+  // printevlist();
 }
 
 /********************** Student-callable ROUTINES ***********************/
