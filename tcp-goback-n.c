@@ -14,7 +14,7 @@
      (although some can be lost).
 **********************************************************************/
 
-#define BIDIRECTIONAL 0 /* change to 1 if you're doing extra credit */
+#define BIDIRECTIONAL 1 /* change to 1 if you're doing extra credit */
                         /* and write a routine called B_output */
 
 #define A 0
@@ -246,7 +246,7 @@ void resend_in_transit(caller_state_t *caller)
 void handle_output(caller_state_t *caller, msg_t *message)
 {
   pkt_t *packet = get_pkt_from_msg(message, caller->next_seqnum, caller->last_acked);
-  add_to_window(&a, packet);
+  add_to_window(caller, packet);
   caller->next_seqnum += PAYLOAD_SIZE;
   send_authorized(caller);
 }
@@ -301,7 +301,7 @@ void handle_input(caller_state_t *caller, pkt_t *packet)
         if (caller->last_acked < (packet->seqnum + PAYLOAD_SIZE))
           tolayer5(caller->id, packet->payload);
         pkt_t ack_pkt;
-        get_ack_pkt(&a, &ack_pkt, packet);
+        get_ack_pkt(caller, &ack_pkt, packet);
         tolayer3(caller->id, ack_pkt);
         caller->last_acked = ack_pkt.acknum;
         // printf("Sending ACK %d\n", ack_pkt.acknum);
@@ -571,7 +571,7 @@ void init() /* initialize the simulator */
   // scanf("%f", &lambda);
   lambda = 10;
   printf("Enter TRACE:");
-  TRACE = 2;
+  TRACE = 3;
   // scanf("%d", &TRACE);
 
   srand(9999); /* init random number generator */
